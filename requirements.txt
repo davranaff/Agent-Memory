@@ -1,0 +1,36 @@
+# Core
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.1
+python-dotenv==1.0.1
+
+# Database
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+alembic==1.14.1
+pgvector==0.3.6
+
+# Redis
+redis[hiredis]==5.2.1
+
+# LangGraph / LangChain
+langgraph==0.2.60
+langchain-core==0.3.29
+langchain-openai==0.2.14
+langchain-community==0.3.14
+
+# MCP
+mcp==1.2.0
+
+# Embeddings
+httpx==0.27.2
+scikit-learn==1.6.1
+numpy==2.2.1
+
+# Ollama
+ollama==0.4.5
+langchain-ollama==0.2.2
+
+# FastMCP
+fastmcp==0.4.1
