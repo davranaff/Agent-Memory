@@ -171,3 +171,161 @@ class ToolCall(Base):
 
     # Relationships
     tool = relationship("Tool", back_populates="tool_calls")
+
+
+class Project(Base):
+    __tablename__ = "projects"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    name = Column(String(255), nullable=False, index=True)
+    path = Column(String(1000), nullable=False, unique=True)
+    description = Column(Text, nullable=True)
+    tech_stack = Column(JSONB, nullable=True, default=list)  # ["python", "fastapi", "postgresql"]
+    architecture_type = Column(String(100), nullable=True)  # mvc, microservices, serverless, monolith
+    frameworks = Column(JSONB, nullable=True, default=list)  # ["fastapi", "react", "vue"]
+    languages = Column(JSONB, nullable=True, default=list)  # ["python", "javascript", "sql"]
+    databases = Column(JSONB, nullable=True, default=list)  # ["postgresql", "redis", "mongodb"]
+    build_tools = Column(JSONB, nullable=True, default=list)  # ["docker", "webpack", "maven"]
+    total_files = Column(Integer, default=0, nullable=False)
+    total_lines = Column(Integer, default=0, nullable=False)
+    last_analyzed = Column(DateTime(timezone=True), nullable=True)
+    analysis_status = Column(
+        String(50), nullable=False, default="pending"
+    )  # pending | analyzing | completed | error
+    analysis_error = Column(Text, nullable=True)
+    metadata_ = Column("metadata", JSONB, nullable=True, default=dict)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+    # Relationships
+    components = relationship("Component", back_populates="project", lazy="selectin")
+    patterns = relationship("CodePattern", back_populates="project", lazy="selectin")
+    documentation = relationship("Documentation", back_populates="project", lazy="selectin")
+
+    __table_args__ = (
+        Index("ix_projects_path", "path"),
+        Index("ix_projects_tech_stack", tech_stack, postgresql_using="gin"),
+        Index("ix_projects_status", "analysis_status"),
+    )
+
+
+class Component(Base):
+    __tablename__ = "components"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    project_id = Column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    name = Column(String(255), nullable=False, index=True)
+    type = Column(
+        String(50), nullable=False
+    )  # file | directory | class | function | interface | enum | struct
+    path = Column(String(1000), nullable=False)
+    relative_path = Column(String(1000), nullable=False)
+    language = Column(String(50), nullable=True)  # python, javascript, java, go, rust, etc.
+    file_extension = Column(String(10), nullable=True)  # .py, .js, .java, .go, .rs
+    size_bytes = Column(Integer, default=0, nullable=False)
+    line_count = Column(Integer, default=0, nullable=False)
+    line_start = Column(Integer, nullable=True)
+    line_end = Column(Integer, nullable=True)
+    complexity_score = Column(Integer, default=0, nullable=False)  # 1-10
+    dependencies = Column(JSONB, nullable=True, default=list)  # imported components
+    dependents = Column(JSONB, nullable=True, default=list)  # components that import this
+    exports = Column(JSONB, nullable=True, default=list)  # public API
+    metadata_ = Column("metadata", JSONB, nullable=True, default=dict)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+    # Relationships
+    project = relationship("Project", back_populates="components")
+
+    __table_args__ = (
+        Index("ix_components_project_type", "project_id", "type"),
+        Index("ix_components_path", "path"),
+        Index("ix_components_language", "language"),
+        Index("ix_components_dependencies", dependencies, postgresql_using="gin"),
+    )
+
+
+class CodePattern(Base):
+    __tablename__ = "code_patterns"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    project_id = Column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=True
+    )
+    name = Column(String(255), nullable=False, index=True)
+    category = Column(String(100), nullable=False)  # architectural | design | creational | structural | behavioral
+    pattern_type = Column(String(100), nullable=False)  # repository | factory | observer | singleton | etc.
+    description = Column(Text, nullable=False)
+    implementation_example = Column(Text, nullable=True)
+    use_cases = Column(JSONB, nullable=True, default=list)
+    benefits = Column(JSONB, nullable=True, default=list)
+    drawbacks = Column(JSONB, nullable=True, default=list)
+    related_patterns = Column(JSONB, nullable=True, default=list)  # pattern names
+    components_involved = Column(JSONB, nullable=True, default=list)  # component IDs
+    confidence_score = Column(Integer, default=5, nullable=False)  # 1-10 how certain we are
+    is_builtin = Column(Boolean, default=False, nullable=False)  # built-in pattern library
+    metadata_ = Column("metadata", JSONB, nullable=True, default=dict)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+    # Relationships
+    project = relationship("Project", back_populates="patterns")
+
+    __table_args__ = (
+        Index("ix_patterns_project_category", "project_id", "category"),
+        Index("ix_patterns_type", "pattern_type"),
+        Index("ix_patterns_builtin", "is_builtin"),
+    )
+
+
+class Documentation(Base):
+    __tablename__ = "documentation"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    project_id = Column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=True
+    )
+    component_id = Column(
+        UUID(as_uuid=True), ForeignKey("components.id", ondelete="CASCADE"), nullable=True
+    )
+    title = Column(String(255), nullable=False)
+    type = Column(
+        String(50), nullable=False
+    )  # readme | api | guide | tutorial | reference | changelog | license
+    path = Column(String(1000), nullable=False)
+    relative_path = Column(String(1000), nullable=False)
+    content = Column(Text, nullable=False)
+    summary = Column(Text, nullable=True)
+    language = Column(String(50), nullable=True)  # markdown | html | pdf | txt
+    format = Column(String(20), nullable=True)  # md | html | pdf | txt
+    size_bytes = Column(Integer, default=0, nullable=False)
+    word_count = Column(Integer, default=0, nullable=False)
+    links = Column(JSONB, nullable=True, default=list)  # internal and external links
+    tags = Column(JSONB, nullable=True, default=list)
+    metadata_ = Column("metadata", JSONB, nullable=True, default=dict)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+    # Relationships
+    project = relationship("Project", back_populates="documentation")
+    component = relationship("Component")
+
+    __table_args__ = (
+        Index("ix_documentation_project_type", "project_id", "type"),
+        Index("ix_documentation_component", "component_id"),
+        Index("ix_documentation_path", "path"),
+        Index("ix_documentation_tags", tags, postgresql_using="gin"),
+    )

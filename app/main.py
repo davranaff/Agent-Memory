@@ -5,8 +5,9 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.responses import JSONResponse
 
 from app.config.settings import get_settings
 from app.db.base import init_db
@@ -58,6 +59,13 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
+    # Close graph backend resources (Neo4j driver, etc.)
+    try:
+        from app.dependencies import close_graph_store
+        await close_graph_store()
+    except Exception:
+        pass
+
 
 def create_app() -> FastAPI:
     """Application factory."""
@@ -71,13 +79,28 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    @app.middleware("http")
+    async def api_key_guard(request: Request, call_next):
+        # Optional guard: enabled only when API_KEY is configured.
+        if not settings.api_key:
+            return await call_next(request)
+
+        public_paths = {"/health", "/docs", "/openapi.json", "/redoc"}
+        if request.url.path in public_paths or request.url.path.startswith("/docs"):
+            return await call_next(request)
+
+        provided_key = request.headers.get("x-api-key")
+        if provided_key != settings.api_key:
+            return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+        return await call_next(request)
+
     # CORS
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_origins=settings.cors_origins_list,
+        allow_credentials=settings.cors_allow_credentials,
+        allow_methods=settings.cors_methods_list,
+        allow_headers=settings.cors_headers_list,
     )
 
     # Register routers
@@ -86,12 +109,20 @@ def create_app() -> FastAPI:
     from app.api.sessions import router as sessions_router
     from app.api.memory import router as memory_router
     from app.api.orchestration import router as orchestration_router
+    from app.api.projects import router as projects_router
+    from app.api.semantic import router as semantic_router
+    from app.api.enhanced import router as enhanced_router
+    from app.api.advanced import router as advanced_router
 
     app.include_router(health_router)
     app.include_router(agents_router)
     app.include_router(sessions_router)
     app.include_router(memory_router)
     app.include_router(orchestration_router)
+    app.include_router(projects_router)
+    app.include_router(semantic_router)
+    app.include_router(enhanced_router)
+    app.include_router(advanced_router)
 
     return app
 

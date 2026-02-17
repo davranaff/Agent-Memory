@@ -204,6 +204,30 @@ class StructuredMemoryStore:
         )
         return list(result.scalars().all())
 
+    async def find_active_memory_by_fingerprint(
+        self,
+        fingerprint: str,
+        agent_id: uuid.UUID | None = None,
+        memory_type: str | None = None,
+        metadata_scope: dict[str, Any] | None = None,
+    ) -> Memory | None:
+        """Find an active memory row by stable fingerprint and optional scope."""
+        q = select(Memory).where(
+            Memory.is_active.is_(True),
+            Memory.metadata_.contains({"__fingerprint": fingerprint}),
+        )
+        if agent_id:
+            q = q.where(Memory.agent_id == agent_id)
+        if memory_type:
+            q = q.where(Memory.memory_type == memory_type)
+        if metadata_scope:
+            q = q.where(Memory.metadata_.contains(metadata_scope))
+
+        result = await self._db.execute(
+            q.order_by(Memory.updated_at.desc()).limit(1)
+        )
+        return result.scalar_one_or_none()
+
     async def update_memory(
         self, memory_id: uuid.UUID, **kwargs: Any
     ) -> Memory | None:

@@ -141,17 +141,44 @@ class AgentService:
         if agent is None:
             raise ValueError(f"Agent {agent_id} not found")
 
-        # Create session if needed
+        # Reuse last active session when session_id is omitted.
         if session_id is None:
-            session = await self._memory_service.structured.create_session(
-                agent_id=agent_id,
-                title=f"Auto-session for: {input_text[:50]}",
-            )
-            session_id = session.id
+            state = await self._short_term.get_agent_state(str(agent_id))
+            candidate_session_id: uuid.UUID | None = None
+            if isinstance(state, dict) and state.get("last_session_id"):
+                try:
+                    candidate_session_id = uuid.UUID(str(state["last_session_id"]))
+                except (ValueError, TypeError):
+                    candidate_session_id = None
+
+            if candidate_session_id is not None:
+                existing = await self._memory_service.structured.get_session(candidate_session_id)
+                if existing is not None and existing.is_active and existing.agent_id == agent_id:
+                    session = existing
+                    session_id = existing.id
+                else:
+                    session = await self._memory_service.structured.create_session(
+                        agent_id=agent_id,
+                        title=f"Auto-session for: {input_text[:50]}",
+                    )
+                    session_id = session.id
+            else:
+                sessions = await self._memory_service.structured.list_sessions(agent_id)
+                if sessions:
+                    session = sessions[0]
+                    session_id = session.id
+                else:
+                    session = await self._memory_service.structured.create_session(
+                        agent_id=agent_id,
+                        title=f"Auto-session for: {input_text[:50]}",
+                    )
+                    session_id = session.id
         else:
             session = await self._memory_service.structured.get_session(session_id)
             if session is None:
                 raise ValueError(f"Session {session_id} not found")
+            if session.agent_id != agent_id:
+                raise ValueError(f"Session {session_id} does not belong to agent {agent_id}")
 
         # Store user message
         await self._memory_service.structured.add_message(

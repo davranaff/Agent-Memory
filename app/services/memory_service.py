@@ -46,12 +46,65 @@ class MemoryService:
         importance: int = 5,
     ) -> dict[str, Any]:
         """Store memory with embedding in both structured and vector stores."""
+        normalized_content = content.strip()
+        metadata_payload = dict(metadata or {})
+        fingerprint = hashlib.sha256(
+            f"{memory_type}|{normalized_content}".encode("utf-8")
+        ).hexdigest()
+        metadata_payload["__fingerprint"] = fingerprint
+
+        metadata_scope = {
+            key: metadata_payload[key]
+            for key in ("project_id", "session_id", "component_id")
+            if key in metadata_payload and metadata_payload[key] is not None
+        }
+        existing = await self._structured.find_active_memory_by_fingerprint(
+            fingerprint=fingerprint,
+            agent_id=agent_id,
+            memory_type=memory_type,
+            metadata_scope=metadata_scope or None,
+        )
+        if existing is not None:
+            merged_metadata = dict(existing.metadata_ or {})
+            changed = False
+            for key, value in metadata_payload.items():
+                if key not in merged_metadata and value is not None:
+                    merged_metadata[key] = value
+                    changed = True
+
+            new_importance = max(int(existing.importance or 0), int(importance))
+            if new_importance != existing.importance:
+                changed = True
+
+            if changed:
+                updated = await self._structured.update_memory(
+                    existing.id,
+                    importance=new_importance,
+                    metadata_=merged_metadata,
+                )
+                if updated is not None:
+                    existing = updated
+                try:
+                    await self._short_term.bump_memory_search_epoch()
+                except Exception:
+                    pass
+
+            return {
+                "id": str(existing.id),
+                "content": existing.content,
+                "memory_type": existing.memory_type,
+                "importance": existing.importance,
+                "created_at": str(existing.created_at),
+                "deduplicated": True,
+                "created": False,
+            }
+
         try:
             mem = await self._vector.store_embedding(
-                content=content,
+                content=normalized_content,
                 memory_type=memory_type,
                 agent_id=agent_id,
-                metadata=metadata,
+                metadata=metadata_payload,
                 importance=importance,
             )
             logger.info("Stored memory %s with embedding", mem.id)
@@ -65,15 +118,17 @@ class MemoryService:
                 "memory_type": mem.memory_type,
                 "importance": mem.importance,
                 "created_at": str(mem.created_at),
+                "deduplicated": False,
+                "created": True,
             }
         except Exception as e:
             logger.warning("Embedding failed, storing without vector: %s", e)
             # Fallback: store without embedding
             mem = await self._structured.create_memory(
-                content=content,
+                content=normalized_content,
                 memory_type=memory_type,
                 agent_id=agent_id,
-                metadata=metadata,
+                metadata=metadata_payload,
                 importance=importance,
             )
             try:
@@ -86,6 +141,8 @@ class MemoryService:
                 "memory_type": mem.memory_type,
                 "importance": mem.importance,
                 "created_at": str(mem.created_at),
+                "deduplicated": False,
+                "created": True,
             }
 
     # ── Search ────────────────────────────────────────────────────────

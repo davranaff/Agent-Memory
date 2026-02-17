@@ -73,11 +73,53 @@ class Settings(BaseSettings):
         default=3, description="Max retries per orchestration step"
     )
 
+    # ── Graph Backend ────────────────────────────────────────────────
+    graph_backend: str = Field(
+        default="inmemory",
+        description="Graph backend: inmemory | neo4j",
+    )
+    graph_fallback_to_inmemory: bool = Field(
+        default=True,
+        description="Fallback to in-memory graph backend if Neo4j is unavailable",
+    )
+    neo4j_uri: str = Field(default="", description="Neo4j bolt URI")
+    neo4j_user: str = Field(default="", description="Neo4j username")
+    neo4j_password: str = Field(default="", description="Neo4j password")
+    neo4j_database: str = Field(default="neo4j", description="Neo4j database name")
+
     # ── General ───────────────────────────────────────────────────────
     debug: bool = Field(default=False)
     app_name: str = Field(default="Agent Brain")
+    api_key: str = Field(default="", description="Optional API key for protected access")
+    cors_allow_origins: str = Field(
+        default="http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173",
+        description="Comma-separated CORS origins; use * only for trusted dev environments",
+    )
+    cors_allow_credentials: bool = Field(default=True)
+    cors_allow_methods: str = Field(default="GET,POST,PUT,PATCH,DELETE,OPTIONS")
+    cors_allow_headers: str = Field(default="Authorization,Content-Type,X-API-Key")
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
+
+    @staticmethod
+    def _csv_to_list(raw: str) -> list[str]:
+        if not raw:
+            return []
+        if raw.strip() == "*":
+            return ["*"]
+        return [item.strip() for item in raw.split(",") if item.strip()]
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        return self._csv_to_list(self.cors_allow_origins)
+
+    @property
+    def cors_methods_list(self) -> list[str]:
+        return self._csv_to_list(self.cors_allow_methods)
+
+    @property
+    def cors_headers_list(self) -> list[str]:
+        return self._csv_to_list(self.cors_allow_headers)
 
 
 # Singleton

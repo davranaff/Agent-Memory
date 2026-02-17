@@ -32,6 +32,10 @@ class EmbeddingProvider(abc.ABC):
         """Return the embedding dimension."""
         ...
 
+    async def embed_text(self, text: str) -> list[float]:
+        """Compatibility alias used by semantic retrieval modules."""
+        return await self.embed(text)
+
 
 class OllamaEmbeddingProvider(EmbeddingProvider):
     """Embeddings via Ollama (e.g. nomic-embed-text)."""
@@ -63,17 +67,28 @@ class OllamaEmbeddingProvider(EmbeddingProvider):
                     embeddings = getattr(response, "embedding", [])
                     if isinstance(embeddings, list) and embeddings and not isinstance(embeddings[0], list):
                         embeddings = [embeddings]
+            
+            if not embeddings:
+                raise ValueError(f"No embeddings returned from Ollama for model {self._model}")
+            
+            # Return the first embedding (most common case)
+            first_embedding = embeddings[0]
+            
+            # Ensure we have the right dimension
+            if len(first_embedding) != self._dim:
+                logger.warning(
+                    f"Embedding dimension mismatch: expected {self._dim}, got {len(first_embedding)}"
+                )
+            
+            return first_embedding
 
-            if embeddings and isinstance(embeddings, list):
-                return embeddings[0]
-                
-            logger.error("Ollama embed response missing embeddings. Response: %s", response)
-            raise RuntimeError(f"Ollama returned no embeddings for model {self._model}")
         except Exception as e:
-            if isinstance(e, RuntimeError) and "no embeddings" in str(e):
-                raise
-            logger.error("Error during Ollama embedding: %s", e)
+            logger.error(f"Error generating embedding with Ollama: {e}")
             raise
+
+    async def embed_text(self, text: str) -> list[float]:
+        """Alias for embed method for compatibility."""
+        return await self.embed(text)
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         import ollama as _ollama
