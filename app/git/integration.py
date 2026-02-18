@@ -8,6 +8,7 @@ import json
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 
+from app.paths import resolve_project_path
 from .hooks import PreCommitHooks
 from .review import CodeReviewAssistant, CodeReviewRequest
 
@@ -18,8 +19,15 @@ class GitIntegration:
     """Git integration utilities for Agent Brain."""
     
     def __init__(self, project_path: str) -> None:
-        self.project_path = Path(project_path)
-        self.hooks = PreCommitHooks(project_path)
+        resolved_path = resolve_project_path(project_path)
+        self.project_path = resolved_path.resolved_path
+        if resolved_path.used_mapping:
+            logger.info(
+                "Resolved git project path via PROJECT_PATH_MAPPINGS: %s -> %s",
+                project_path,
+                self.project_path,
+            )
+        self.hooks = PreCommitHooks(str(self.project_path))
         self.review_assistant = CodeReviewAssistant()
     
     def is_git_repository(self) -> bool:

@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.models import Project, Component, Documentation, CodePattern
+from app.paths import resolve_project_path
+from app.config.settings import get_settings
 from .scanner import ProjectScanner, FileInfo, DirectoryInfo
 from .analyzer import ProjectAnalyzer
 from app.parsing import parse_file
@@ -37,7 +39,29 @@ class ProjectIndexer:
                            project_name: Optional[str] = None,
                            force_reindex: bool = False) -> Project:
         """Index a project from scratch or update existing."""
-        project_path = str(Path(project_path).resolve())
+        requested_project_path = project_path
+        resolved_path = resolve_project_path(project_path)
+        project_path = str(resolved_path.resolved_path)
+
+        if resolved_path.used_mapping:
+            logger.info(
+                "Resolved project path via PROJECT_PATH_MAPPINGS: %s -> %s",
+                requested_project_path,
+                project_path,
+            )
+
+        if not resolved_path.resolved_path.exists() or not resolved_path.resolved_path.is_dir():
+            mapping_hint = ""
+            project_path_mappings = get_settings().project_path_mappings
+            if project_path_mappings:
+                mapping_hint = (
+                    f" Current PROJECT_PATH_MAPPINGS='{project_path_mappings}'."
+                )
+            raise ValueError(
+                "Invalid project path: "
+                f"{requested_project_path}. Ensure the directory is mounted into the backend container "
+                f"and configure PROJECT_PATH_MAPPINGS for host->container translation.{mapping_hint}"
+            )
         
         # Check if project already exists
         existing_project = await self._get_project_by_path(project_path)

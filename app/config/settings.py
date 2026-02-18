@@ -91,6 +91,10 @@ class Settings(BaseSettings):
     debug: bool = Field(default=False)
     app_name: str = Field(default="Agent Brain")
     api_key: str = Field(default="", description="Optional API key for protected access")
+    project_path_mappings: str = Field(
+        default="",
+        description="Comma-separated host/container path mappings: /host=/container,/host2=/container2",
+    )
     cors_allow_origins: str = Field(
         default="http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173",
         description="Comma-separated CORS origins; use * only for trusted dev environments",

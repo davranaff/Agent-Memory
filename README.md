@@ -17,6 +17,18 @@ docker compose up --build
 curl http://localhost:8000/health
 ```
 
+### Indexing Projects Outside This Repo (Docker)
+
+If you analyze projects by host path (for example `/Users/...`), configure:
+
+- `HOST_PROJECTS_ROOT` in `.env` for a host directory mounted into the `app` container.
+- `PROJECT_PATH_MAPPINGS` for host-to-container translation, e.g.:
+
+```env
+HOST_PROJECTS_ROOT=..
+PROJECT_PATH_MAPPINGS=/Users/your-user/Desktop=/host-projects
+```
+
 ## Architecture
 
 ```
@@ -153,6 +165,8 @@ curl "http://localhost:8000/projects/<project-id>/graph/impact?component_id=<com
 | `EMBEDDING_MODEL` | `nomic-embed-text` | Embedding model |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama API URL |
 | `MCP_ENABLED` | `true` | Enable MCP server |
+| `PROJECT_PATH_MAPPINGS` | `` | Host/container prefix mappings for project paths (`/host=/container`) |
+| `HOST_PROJECTS_ROOT` | `..` | Docker Compose host directory mounted to `/host-projects` |
 | `ORCHESTRATION_ENABLED` | `true` | Enable multi-agent orchestration |
 | `ORCHESTRATION_MAX_PARALLEL_AGENTS` | `4` | Max concurrent agents |
 | `ORCHESTRATION_MAX_RETRIES` | `3` | Max retries per step |

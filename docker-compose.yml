@@ -14,6 +14,7 @@ services:
         condition: service_healthy
     volumes:
       - .:/app
+      - ${HOST_PROJECTS_ROOT:-..}:/host-projects
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
