@@ -1,10 +1,9 @@
-version: "3.9"
-
 services:
   app:
     build: .
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "10001"]
     ports:
-      - "8000:8000"
+      - "10001:10001"
     env_file:
       - .env
     depends_on:
@@ -26,7 +25,7 @@ services:
       POSTGRES_PASSWORD: agentpass
       POSTGRES_DB: agent_brain
     ports:
-      - "5432:5432"
+      - "15432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -39,7 +38,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "16379:6379"
     volumes:
       - redisdata:/data
     healthcheck:
@@ -58,8 +57,8 @@ services:
       NEO4J_server_memory_heap_initial__size: 512M
       NEO4J_server_memory_heap_max__size: 512M
     ports:
-      - "7474:7474"
-      - "7687:7687"
+      - "17474:7474"
+      - "17687:7687"
     volumes:
       - neo4jdata:/data
     healthcheck:

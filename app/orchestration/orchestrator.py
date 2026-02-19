@@ -50,6 +50,8 @@ class Orchestrator:
         workflow_name: str,
         input_text: str,
         run_id: uuid.UUID | None = None,
+        project_id: str | None = None,
+        agent_overrides: dict[str, uuid.UUID] | None = None,
     ) -> dict[str, Any]:
         """Execute a complete workflow.
 
@@ -96,11 +98,29 @@ class Orchestrator:
 
         try:
             if workflow.execution_mode == ExecutionMode.SEQUENTIAL:
-                result = await self._execute_sequential(run, workflow, input_text)
+                result = await self._execute_sequential(
+                    run,
+                    workflow,
+                    input_text,
+                    project_id=project_id,
+                    agent_overrides=agent_overrides,
+                )
             elif workflow.execution_mode == ExecutionMode.PARALLEL:
-                result = await self._execute_parallel(run, workflow, input_text)
+                result = await self._execute_parallel(
+                    run,
+                    workflow,
+                    input_text,
+                    project_id=project_id,
+                    agent_overrides=agent_overrides,
+                )
             elif workflow.execution_mode == ExecutionMode.MIXED:
-                result = await self._execute_mixed(run, workflow, input_text)
+                result = await self._execute_mixed(
+                    run,
+                    workflow,
+                    input_text,
+                    project_id=project_id,
+                    agent_overrides=agent_overrides,
+                )
             else:
                 raise ValueError(f"Unknown execution mode: {workflow.execution_mode}")
 
@@ -139,6 +159,9 @@ class Orchestrator:
         run: OrchestrationRun,
         workflow: WorkflowDefinition,
         input_text: str,
+        *,
+        project_id: str | None = None,
+        agent_overrides: dict[str, uuid.UUID] | None = None,
     ) -> str:
         """Execute workflow steps sequentially, piping output → input."""
         current_input = input_text
@@ -151,6 +174,8 @@ class Orchestrator:
                 step_index=i,
                 input_text=current_input,
                 max_retries=workflow.max_retries,
+                project_id=project_id,
+                agent_overrides=agent_overrides,
             )
             intermediate.append(result)
             current_input = result.get("output", current_input)
@@ -166,6 +191,9 @@ class Orchestrator:
         run: OrchestrationRun,
         workflow: WorkflowDefinition,
         input_text: str,
+        *,
+        project_id: str | None = None,
+        agent_overrides: dict[str, uuid.UUID] | None = None,
     ) -> str:
         """Execute all workflow steps in parallel."""
         max_concurrent = self._settings.orchestration_max_parallel_agents
@@ -179,6 +207,8 @@ class Orchestrator:
                     step_index=idx,
                     input_text=input_text,
                     max_retries=workflow.max_retries,
+                    project_id=project_id,
+                    agent_overrides=agent_overrides,
                 )
 
         tasks = [
@@ -213,6 +243,9 @@ class Orchestrator:
         run: OrchestrationRun,
         workflow: WorkflowDefinition,
         input_text: str,
+        *,
+        project_id: str | None = None,
+        agent_overrides: dict[str, uuid.UUID] | None = None,
     ) -> str:
         """Execute mixed mode: sequential groups with parallel steps within.
 
@@ -258,6 +291,8 @@ class Orchestrator:
                     step_index=idx,
                     input_text=current_input,
                     max_retries=workflow.max_retries,
+                    project_id=project_id,
+                    agent_overrides=agent_overrides,
                 )
                 intermediate.append(result)
                 current_input = result.get("output", current_input)
@@ -274,6 +309,8 @@ class Orchestrator:
                             step_index=ix,
                             input_text=current_input,
                             max_retries=workflow.max_retries,
+                            project_id=project_id,
+                            agent_overrides=agent_overrides,
                         )
 
                 tasks = [_bounded(step, idx) for idx, step in group]
@@ -307,6 +344,9 @@ class Orchestrator:
         step_index: int,
         input_text: str,
         max_retries: int = 3,
+        *,
+        project_id: str | None = None,
+        agent_overrides: dict[str, uuid.UUID] | None = None,
     ) -> dict[str, Any]:
         """Execute a single agent step with retry logic."""
         last_error: Exception | None = None
@@ -319,6 +359,8 @@ class Orchestrator:
                     step_index=step_index,
                     input_text=input_text,
                     attempt=attempt,
+                    project_id=project_id,
+                    agent_overrides=agent_overrides,
                 )
             except Exception as e:
                 last_error = e
@@ -345,9 +387,14 @@ class Orchestrator:
         step_index: int,
         input_text: str,
         attempt: int = 0,
+        *,
+        project_id: str | None = None,
+        agent_overrides: dict[str, uuid.UUID] | None = None,
     ) -> dict[str, Any]:
         """Execute a single agent step."""
-        agent_id = await self._registry.resolve(step.agent_name)
+        agent_id = (agent_overrides or {}).get(step.agent_name)
+        if agent_id is None:
+            agent_id = await self._registry.resolve(step.agent_name)
         if agent_id is None:
             raise ValueError(f"Agent '{step.agent_name}' not found in registry")
 
@@ -378,6 +425,7 @@ class Orchestrator:
             result = await self._agent_service.run_agent(
                 agent_id=agent_id,
                 input_text=input_text,
+                context={"project_id": project_id} if project_id else None,
             )
             duration_ms = int((time.monotonic() - start_time) * 1000)
 

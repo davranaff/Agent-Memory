@@ -17,6 +17,7 @@ logging.basicConfig(
     format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
 )
 logger = logging.getLogger(__name__)
+_autonomous_supervisor = None
 
 
 @asynccontextmanager
@@ -37,6 +38,16 @@ async def lifespan(app: FastAPI):
             logger.info("MCP server routes registered at /mcp")
         except Exception as e:
             logger.error("Failed to configure MCP server: %s", e)
+
+    global _autonomous_supervisor
+    if settings.autonomous_background_enabled:
+        try:
+            from app.services.autonomous_supervisor import AutonomousProjectSupervisor
+
+            _autonomous_supervisor = AutonomousProjectSupervisor()
+            _autonomous_supervisor.start()
+        except Exception as e:
+            logger.error("Failed to start autonomous supervisor: %s", e)
 
     logger.info(
         "%s is ready | LLM: %s (%s) | Embeddings: %s (%s)",
@@ -65,6 +76,14 @@ async def lifespan(app: FastAPI):
         await close_graph_store()
     except Exception:
         pass
+
+    # Stop autonomous supervisor
+    if _autonomous_supervisor is not None:
+        try:
+            await _autonomous_supervisor.stop()
+        except Exception:
+            pass
+        _autonomous_supervisor = None
 
 
 def create_app() -> FastAPI:

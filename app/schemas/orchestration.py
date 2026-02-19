@@ -20,6 +20,14 @@ class OrchestrationRunRequest(BaseModel):
         default=False,
         description="Auto-route to best workflow based on input.",
     )
+    background: bool = Field(
+        default=True,
+        description="Run asynchronously in background and return pending status immediately.",
+    )
+    project_id: uuid.UUID | None = Field(
+        default=None,
+        description="Optional project scope for project-bound agent workflows.",
+    )
 
 
 # ── Response ──────────────────────────────────────────────────────────

@@ -7,6 +7,7 @@ in-memory graph store or Neo4j as a graph read-model backend.
 from __future__ import annotations
 
 import abc
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -104,6 +105,14 @@ def _path_matches_any(path_value: str | None, changed_paths: list[str]) -> bool:
         ):
             return True
     return False
+
+
+def _to_neo4j_json(value: Any) -> str:
+    """Serialize arbitrary value to JSON text for Neo4j property storage."""
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    except Exception:
+        return json.dumps(str(value), ensure_ascii=False)
 
 
 class InMemoryGraphStore(GraphStore):
@@ -312,6 +321,58 @@ class Neo4jGraphStore(GraphStore):
     async def verify_connectivity(self) -> None:
         await self._driver.verify_connectivity()
 
+    @staticmethod
+    def _optional_int(value: Any) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _string_list(value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item) for item in value if item is not None]
+
+    def _node_params(self, project_id: str, node: DependencyNode) -> dict[str, Any]:
+        metadata = node.metadata or {}
+        return {
+            "project_id": project_id,
+            "component_id": node.id,
+            "name": node.name,
+            "type": node.type.value,
+            "path": node.path,
+            "language": node.language,
+            "relative_path": str(metadata.get("relative_path") or ""),
+            "file_extension": str(metadata.get("file_extension") or ""),
+            "line_start": self._optional_int(metadata.get("line_start")),
+            "line_end": self._optional_int(metadata.get("line_end")),
+            "exports": self._string_list(metadata.get("exports")),
+            "metadata_json": _to_neo4j_json(metadata),
+            "lines_of_code": int(node.lines_of_code or 0),
+            "complexity_score": int(node.complexity_score or 0),
+            "is_entry_point": bool(node.is_entry_point),
+            "is_utility": bool(node.is_utility),
+            "is_test": bool(node.is_test),
+            "is_generated": bool(node.is_generated),
+        }
+
+    def _edge_params(self, project_id: str, edge: DependencyEdge) -> dict[str, Any]:
+        return {
+            "project_id": project_id,
+            "source_id": edge.source_id,
+            "target_id": edge.target_id,
+            "edge_type": edge.type.value,
+            "weight": float(edge.weight),
+            "metadata_json": _to_neo4j_json(edge.metadata or {}),
+        }
+
     async def sync_project_graph(self, project_id: str, graph: DependencyGraph) -> None:
         await self._run_write(
             """
@@ -341,7 +402,12 @@ class Neo4jGraphStore(GraphStore):
                       c.type = $type,
                       c.path = $path,
                       c.language = $language,
-                      c.metadata = $metadata,
+                      c.relative_path = $relative_path,
+                      c.file_extension = $file_extension,
+                      c.line_start = $line_start,
+                      c.line_end = $line_end,
+                      c.exports = $exports,
+                      c.metadata_json = $metadata_json,
                       c.lines_of_code = $lines_of_code,
                       c.complexity_score = $complexity_score,
                       c.is_entry_point = $is_entry_point,
@@ -350,21 +416,21 @@ class Neo4jGraphStore(GraphStore):
                       c.is_generated = $is_generated
                     MERGE (p)-[:HAS_COMPONENT]->(c)
                     """,
-                    {
-                        "project_id": project_id,
-                        "component_id": node.id,
-                        "name": node.name,
-                        "type": node.type.value,
-                        "path": node.path,
-                        "language": node.language,
-                        "metadata": node.metadata,
-                        "lines_of_code": node.lines_of_code,
-                        "complexity_score": node.complexity_score,
-                        "is_entry_point": node.is_entry_point,
-                        "is_utility": node.is_utility,
-                        "is_test": node.is_test,
-                        "is_generated": node.is_generated,
-                    },
+                    self._node_params(project_id, node),
+                )
+
+            for edge in graph.edges.values():
+                await session.run(
+                    """
+                    MATCH (src:Component {id: $source_id})
+                    MATCH (dst:Component {id: $target_id})
+                    MERGE (src)-[r:DEPENDS_ON {project_id: $project_id, edge_type: $edge_type}]->(dst)
+                    SET
+                      r.weight = $weight,
+                      r.metadata_json = $metadata_json,
+                      r.updated_at = datetime()
+                    """,
+                    self._edge_params(project_id, edge),
                 )
 
     async def sync_project_graph_incremental(
@@ -414,7 +480,12 @@ class Neo4jGraphStore(GraphStore):
                       c.type = $type,
                       c.path = $path,
                       c.language = $language,
-                      c.metadata = $metadata,
+                      c.relative_path = $relative_path,
+                      c.file_extension = $file_extension,
+                      c.line_start = $line_start,
+                      c.line_end = $line_end,
+                      c.exports = $exports,
+                      c.metadata_json = $metadata_json,
                       c.lines_of_code = $lines_of_code,
                       c.complexity_score = $complexity_score,
                       c.is_entry_point = $is_entry_point,
@@ -423,21 +494,7 @@ class Neo4jGraphStore(GraphStore):
                       c.is_generated = $is_generated
                     MERGE (p)-[:HAS_COMPONENT]->(c)
                     """,
-                    {
-                        "project_id": project_id,
-                        "component_id": node.id,
-                        "name": node.name,
-                        "type": node.type.value,
-                        "path": node.path,
-                        "language": node.language,
-                        "metadata": node.metadata,
-                        "lines_of_code": node.lines_of_code,
-                        "complexity_score": node.complexity_score,
-                        "is_entry_point": node.is_entry_point,
-                        "is_utility": node.is_utility,
-                        "is_test": node.is_test,
-                        "is_generated": node.is_generated,
-                    },
+                    self._node_params(project_id, node),
                 )
 
             for edge in graph.edges.values():
@@ -448,38 +505,10 @@ class Neo4jGraphStore(GraphStore):
                     MERGE (src)-[r:DEPENDS_ON {project_id: $project_id, edge_type: $edge_type}]->(dst)
                     SET
                       r.weight = $weight,
-                      r.metadata = $metadata,
+                      r.metadata_json = $metadata_json,
                       r.updated_at = datetime()
                     """,
-                    {
-                        "project_id": project_id,
-                        "source_id": edge.source_id,
-                        "target_id": edge.target_id,
-                        "edge_type": edge.type.value,
-                        "weight": edge.weight,
-                        "metadata": edge.metadata,
-                    },
-                )
-
-            for edge in graph.edges.values():
-                await session.run(
-                    """
-                    MATCH (src:Component {id: $source_id})
-                    MATCH (dst:Component {id: $target_id})
-                    MERGE (src)-[r:DEPENDS_ON {project_id: $project_id, edge_type: $edge_type}]->(dst)
-                    SET
-                      r.weight = $weight,
-                      r.metadata = $metadata,
-                      r.updated_at = datetime()
-                    """,
-                    {
-                        "project_id": project_id,
-                        "source_id": edge.source_id,
-                        "target_id": edge.target_id,
-                        "edge_type": edge.type.value,
-                        "weight": edge.weight,
-                        "metadata": edge.metadata,
-                    },
+                    self._edge_params(project_id, edge),
                 )
 
     async def get_graph_statistics(self, project_id: str) -> dict[str, Any]:

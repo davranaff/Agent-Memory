@@ -23,6 +23,10 @@ class Settings(BaseSettings):
 
     # ── MCP ───────────────────────────────────────────────────────────
     mcp_enabled: bool = Field(default=True, description="Enable MCP server")
+    mcp_db_query_enabled: bool = Field(
+        default=True,
+        description="Enable MCP db_query tool",
+    )
 
     # ── Ollama (Local LLM) ────────────────────────────────────────────
     ollama_enabled: bool = Field(default=True, description="Enable Ollama")
@@ -72,6 +76,10 @@ class Settings(BaseSettings):
     orchestration_max_retries: int = Field(
         default=3, description="Max retries per orchestration step"
     )
+    orchestration_autocreate_agents: bool = Field(
+        default=True,
+        description="Auto-create missing role agents for orchestration workflows",
+    )
 
     # ── Graph Backend ────────────────────────────────────────────────
     graph_backend: str = Field(
@@ -94,6 +102,30 @@ class Settings(BaseSettings):
     project_path_mappings: str = Field(
         default="",
         description="Comma-separated host/container path mappings: /host=/container,/host2=/container2",
+    )
+    autonomous_project_env_keys: str = Field(
+        default="MCP_PROJECT_PATH,IDE_PROJECT_PATH,WORKSPACE_FOLDER,WORKSPACE_ROOT,VSCODE_WORKSPACE_FOLDER,PROJECT_PATH",
+        description="Comma-separated env keys used for autonomous project path detection",
+    )
+    autonomous_project_fallback_path: str = Field(
+        default="",
+        description="Optional fallback project path when MCP/IDE context is absent",
+    )
+    autonomous_background_enabled: bool = Field(
+        default=True,
+        description="Enable autonomous background project maintenance loop",
+    )
+    autonomous_background_interval_seconds: int = Field(
+        default=120,
+        description="Supervisor tick interval in seconds",
+    )
+    autonomous_background_project_limit: int = Field(
+        default=5,
+        description="How many recent projects to maintain when no active context exists",
+    )
+    autonomous_background_project_cooldown_seconds: int = Field(
+        default=600,
+        description="Minimum delay before reprocessing the same project",
     )
     cors_allow_origins: str = Field(
         default="http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173",
@@ -124,6 +156,10 @@ class Settings(BaseSettings):
     @property
     def cors_headers_list(self) -> list[str]:
         return self._csv_to_list(self.cors_allow_headers)
+
+    @property
+    def autonomous_project_env_keys_list(self) -> list[str]:
+        return self._csv_to_list(self.autonomous_project_env_keys)
 
 
 # Singleton

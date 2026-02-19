@@ -13,6 +13,7 @@ class ComponentType(str, Enum):
     """Types of components."""
     CLASS = "class"
     FUNCTION = "function"
+    ASYNC_FUNCTION = "async_function"
     METHOD = "method"
     INTERFACE = "interface"
     STRUCT = "struct"

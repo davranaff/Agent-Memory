@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import uuid
 import asyncio
+import re
 from typing import Any
 
 import anyio
@@ -18,8 +19,13 @@ from app.config.settings import get_settings
 from app.db.session import _get_session_factory
 from app.memory.embeddings import get_embedding_provider
 from app.memory.short_term import ShortTermMemory
+from app.paths import (
+    extract_project_paths_from_mcp_params,
+    project_path_candidates_from_env,
+)
 from app.services.agent_service import AgentService
 from app.services.memory_service import MemoryService
+from app.services.project_memory import persist_project_memories
 
 logger = logging.getLogger(__name__)
 
@@ -74,13 +80,75 @@ async def _clear_active_mcp_context() -> bool:
     return await short_term.cache_delete(_MCP_CONTEXT_CACHE_KEY)
 
 
-# Whitelist of tables allowed in db_query (#1 fix)
-_ALLOWED_TABLES = frozenset({
+async def _capture_project_path_in_context(candidate_path: str, source: str) -> None:
+    """Store auto-detected project path in active MCP context."""
+    cleaned = (candidate_path or "").strip()
+    if not cleaned:
+        return
+    context = await _get_active_mcp_context()
+    context["project_path"] = cleaned
+    context["project_path_source"] = source
+    await _set_active_mcp_context(context)
+
+
+def _auto_project_path_from_env() -> str | None:
+    """Detect project path from configured environment variables."""
+    settings = get_settings()
+    candidates = project_path_candidates_from_env(
+        raw_env_keys=settings.autonomous_project_env_keys,
+        fallback_path=settings.autonomous_project_fallback_path,
+    )
+    return candidates[0] if candidates else None
+
+
+async def _resolve_default_component_id(db: Any, project_id: str) -> str | None:
+    """Pick a stable default component for graph-neighbors fallback."""
+    from sqlalchemy import case, select
+    from app.core.models import Component
+
+    stmt = (
+        select(Component.id)
+        .where(Component.project_id == project_id)
+        .order_by(
+            case(
+                (Component.type == "file", 0),
+                (Component.type == "class", 1),
+                (Component.type == "function", 2),
+                (Component.type == "async_function", 3),
+                else_=9,
+            ),
+            Component.relative_path.asc(),
+        )
+        .limit(1)
+    )
+    result = await db.execute(stmt)
+    component_id = result.scalar_one_or_none()
+    return str(component_id) if component_id is not None else None
+
+
+async def _resolve_project_name(db: Any, project_id: str) -> str | None:
+    from sqlalchemy import select
+    from app.core.models import Project
+
+    try:
+        project_uuid = uuid.UUID(str(project_id))
+    except (ValueError, TypeError):
+        return None
+    stmt = select(Project.name).where(Project.id == project_uuid).limit(1)
+    result = await db.execute(stmt)
+    value = result.scalar_one_or_none()
+    return str(value) if value is not None else None
+
+
+# Whitelist of public tables allowed in db_query
+_ALLOWED_PUBLIC_TABLES = frozenset({
     "agents", "sessions", "messages", "memories",
     "tools", "tool_calls", "orchestration_runs", "orchestration_steps",
 })
+_ALLOWED_METADATA_SCHEMAS = frozenset({"information_schema", "pg_catalog"})
 _MAX_QUERY_LENGTH = 2000
 _MAX_RESULT_ROWS = 100
+_MAX_RESULT_ROWS_HARD = 1000
 
 _DISCONNECT_EXCEPTIONS = (
     anyio.BrokenResourceError,
@@ -104,6 +172,32 @@ def _is_expected_disconnect(exc: BaseException) -> bool:
     leaves = tuple(_iter_leaf_exceptions(exc))
     return bool(leaves) and all(isinstance(leaf, _DISCONNECT_EXCEPTIONS) for leaf in leaves)
 
+
+def _normalize_sql_identifier(identifier: str) -> str:
+    """Normalize SQL identifier for allowlist matching."""
+    ident = identifier.strip().strip('"').strip()
+    return ident.lower()
+
+
+def _extract_table_refs(sql: str) -> list[tuple[str, str]]:
+    """Extract FROM/JOIN references as (schema, table)."""
+    # Supports:
+    # - table
+    # - schema.table
+    # - "schema"."table"
+    pattern = re.compile(
+        r'(?:FROM|JOIN)\s+((?:"?[a-zA-Z_][a-zA-Z0-9_$]*"?)(?:\.(?:"?[a-zA-Z_][a-zA-Z0-9_$]*"?))?)',
+        re.IGNORECASE,
+    )
+    refs: list[tuple[str, str]] = []
+    for raw_ref in pattern.findall(sql):
+        parts = [_normalize_sql_identifier(part) for part in raw_ref.split(".")]
+        if len(parts) == 1:
+            refs.append(("public", parts[0]))
+        elif len(parts) == 2:
+            refs.append((parts[0], parts[1]))
+    return refs
+
 # Create the MCP server instance using FastMCP
 mcp = FastMCP("agent-brain")
 
@@ -112,6 +206,7 @@ mcp = FastMCP("agent-brain")
 async def context_set(
     agent_id: str | None = None,
     project_id: str | None = None,
+    project_path: str | None = None,
     session_id: str | None = None,
     ttl_seconds: int = _MCP_CONTEXT_TTL_SECONDS,
 ) -> Any:
@@ -121,6 +216,7 @@ async def context_set(
     Inputs:
     - agent_id: Optional UUID for agent-scoped tools.
     - project_id: Optional project UUID for project/graph tools.
+    - project_path: Optional project filesystem path for autonomous analysis.
     - session_id: Optional UUID for conversation continuity.
     - ttl_seconds: Context TTL in seconds.
 
@@ -151,6 +247,7 @@ async def context_set(
         {
             "agent_id": agent_id,
             "project_id": project_id,
+            "project_path": project_path,
             "session_id": session_id,
         }
     )
@@ -398,6 +495,7 @@ async def run_agent(
     input: str,
     agent_id: str | None = None,
     session_id: str | None = None,
+    background: bool = True,
 ) -> Any:
     """When to use:
     Execute a real task through the configured agent runtime.
@@ -406,24 +504,46 @@ async def run_agent(
     - input: User/task instruction.
     - agent_id: Optional; auto-filled from context.
     - session_id: Optional; auto-filled from context.
+    - background: Run asynchronously in background and return run_id immediately.
 
     Returns:
     - Agent output, message trace, tool calls, and effective session identifiers.
 
     Common mistakes:
-    - Calling without agent_id and without context_set.
+    - Calling without agent_id and without project/agent context.
     - Treating this as simulation instead of state-mutating execution.
     """
     context = await _get_active_mcp_context()
     effective_agent_id = agent_id or context.get("agent_id")
+    effective_project_id = context.get("project_id")
+    project_agents: dict[str, dict[str, Any]] = {}
+    auto_selected_project_agent = False
     if not effective_agent_id:
-        return {"error": "agent_id is required (pass explicitly or set via context_set)"}
+        if not effective_project_id:
+            return {
+                "error": (
+                    "agent_id is required (pass explicitly or set via context_set). "
+                    "Or set project_id in context to auto-select a project-scoped planner agent."
+                )
+            }
     effective_session_id = session_id or context.get("session_id")
 
     factory = _get_session_factory()
     short_term = _get_short_term()
     async with factory() as db:
         svc = AgentService(db, short_term)
+        if not effective_agent_id:
+            project_name = await _resolve_project_name(db, effective_project_id)
+            project_agents = await svc.ensure_project_agents(
+                project_id=str(effective_project_id),
+                project_name=project_name,
+            )
+            planner = project_agents.get("planner")
+            if not planner:
+                return {"error": "Failed to resolve project-scoped planner agent"}
+            effective_agent_id = str(planner["id"])
+            auto_selected_project_agent = True
+
         try:
             parsed_agent_id = uuid.UUID(effective_agent_id)
             parsed_session_id = (
@@ -431,16 +551,44 @@ async def run_agent(
             )
         except ValueError as e:
             return {"error": f"Invalid UUID: {e}"}
+        if background:
+            result = await svc.enqueue_run(
+                agent_id=parsed_agent_id,
+                input_text=input,
+                session_id=parsed_session_id,
+                context={"project_id": str(effective_project_id)} if effective_project_id else None,
+            )
+            next_context = await _get_active_mcp_context()
+            next_context["agent_id"] = effective_agent_id
+            if effective_project_id:
+                next_context["project_id"] = str(effective_project_id)
+            await _set_active_mcp_context(next_context)
+            await db.commit()
+            if auto_selected_project_agent:
+                result["auto_selected_agent"] = True
+                result["project_agents"] = {
+                    role: info.get("id") for role, info in project_agents.items()
+                }
+            return result
+
         result = await svc.run_agent(
             agent_id=parsed_agent_id,
             input_text=input,
             session_id=parsed_session_id,
+            context={"project_id": str(effective_project_id)} if effective_project_id else None,
         )
         next_context = await _get_active_mcp_context()
         next_context["agent_id"] = result.get("agent_id")
         next_context["session_id"] = result.get("session_id")
+        if effective_project_id:
+            next_context["project_id"] = str(effective_project_id)
         await _set_active_mcp_context(next_context)
         await db.commit()
+        if auto_selected_project_agent:
+            result["auto_selected_agent"] = True
+            result["project_agents"] = {
+                role: info.get("id") for role, info in project_agents.items()
+            }
         return result
 
 
@@ -460,12 +608,29 @@ async def get_agent_state(agent_id: str | None = None) -> Any:
     """
     context = await _get_active_mcp_context()
     effective_agent_id = agent_id or context.get("agent_id")
-    if not effective_agent_id:
-        return {"error": "agent_id is required (pass explicitly or set via context_set)"}
-
     factory = _get_session_factory()
+    short_term = _get_short_term()
     async with factory() as db:
-        svc = AgentService(db)
+        svc = AgentService(db, short_term)
+        if not effective_agent_id and context.get("project_id"):
+            project_name = await _resolve_project_name(db, str(context["project_id"]))
+            project_agents = await svc.ensure_project_agents(
+                project_id=str(context["project_id"]),
+                project_name=project_name,
+            )
+            planner = project_agents.get("planner")
+            if planner:
+                effective_agent_id = str(planner["id"])
+                context["agent_id"] = effective_agent_id
+                await _set_active_mcp_context(context)
+
+        if not effective_agent_id:
+            return {
+                "error": (
+                    "agent_id is required (pass explicitly or set via context_set). "
+                    "Or set project_id in context to auto-select a project-scoped planner agent."
+                )
+            }
         try:
             parsed_agent_id = uuid.UUID(effective_agent_id)
         except ValueError as e:
@@ -474,13 +639,42 @@ async def get_agent_state(agent_id: str | None = None) -> Any:
         return state or {"error": "Agent not found"}
 
 
+@mcp.tool(name="agent_run_status")
+async def get_agent_run_status(run_id: str) -> Any:
+    """When to use:
+    Poll asynchronous agent run status after calling agent_run(background=true).
+
+    Inputs:
+    - run_id: Async run UUID returned by agent_run.
+
+    Returns:
+    - pending/running/completed/failed payload with result or error.
+
+    Common mistakes:
+    - Expecting immediate output from background runs without polling status.
+    """
+    factory = _get_session_factory()
+    short_term = _get_short_term()
+    async with factory() as db:
+        svc = AgentService(db, short_term)
+        try:
+            parsed_run_id = uuid.UUID(run_id)
+        except ValueError as e:
+            return {"error": f"Invalid run_id: {e}"}
+        status = await svc.get_run_status(parsed_run_id)
+        if status is None:
+            return {"error": "Agent run not found"}
+        return status
+
+
 @mcp.tool(name="db_query")
-async def query_db(sql: str) -> Any:
+async def query_db(sql: str, max_rows: int = _MAX_RESULT_ROWS) -> Any:
     """When to use:
     Verify facts directly from database truth.
 
     Inputs:
     - sql: Read-only SELECT statement.
+    - max_rows: Row limit for response payload (1..1000).
 
     Returns:
     - columns/rows/count/truncated payload.
@@ -489,7 +683,17 @@ async def query_db(sql: str) -> Any:
     - Sending non-SELECT SQL or querying non-whitelisted tables.
     - Including multiple statements or blocked clauses.
     """
-    import re
+    settings = get_settings()
+    if not settings.mcp_db_query_enabled:
+        return {
+            "error": (
+                "db_query is disabled by configuration. "
+                "Set MCP_DB_QUERY_ENABLED=true to enable it."
+            )
+        }
+
+    if max_rows < 1 or max_rows > _MAX_RESULT_ROWS_HARD:
+        return {"error": f"max_rows must be between 1 and {_MAX_RESULT_ROWS_HARD}"}
 
     sql = sql.strip()
     if len(sql) > _MAX_QUERY_LENGTH:
@@ -512,7 +716,7 @@ async def query_db(sql: str) -> Any:
         return {
             "error": (
                 "Only SELECT queries are allowed in db_query. "
-                "For project data use project_list/project_components/project_analyze/project_graph_* tools."
+                "For write/update operations use dedicated API tools."
             )
         }
 
@@ -540,30 +744,43 @@ async def query_db(sql: str) -> Any:
                 )
             }
 
-    # Table whitelist: extract FROM/JOIN targets
-    table_refs = re.findall(
-        r'(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)', sql, re.IGNORECASE
-    )
-    for table in table_refs:
-        if table.lower() not in _ALLOWED_TABLES:
-            return {
-                "error": (
-                    f"Table not allowed: {table}. "
-                    "Use project_list/project_components/project_analyze/project_graph_* tools for project entities."
-                )
-            }
+    # Table/schema allowlist: project tables in `public` + metadata schemas
+    table_refs = _extract_table_refs(sql)
+    for schema, table in table_refs:
+        if schema in _ALLOWED_METADATA_SCHEMAS:
+            continue
+        if schema == "public" and table in _ALLOWED_PUBLIC_TABLES:
+            continue
+        table_name = f"{schema}.{table}"
+        allowed_public = ", ".join(sorted(_ALLOWED_PUBLIC_TABLES))
+        allowed_meta = ", ".join(sorted(_ALLOWED_METADATA_SCHEMAS))
+        return {
+            "error": (
+                f"Table not allowed: {table_name}. "
+                f"Allowed public tables: {allowed_public}. "
+                f"Allowed metadata schemas: {allowed_meta}."
+            )
+        }
 
     factory = _get_session_factory()
     async with factory() as db:
         from sqlalchemy import text
         result = await db.execute(text(sql))
-        rows = result.fetchmany(_MAX_RESULT_ROWS)
-        columns = list(result.keys()) if rows else []
+        columns = list(result.keys())
+        rows = result.fetchmany(max_rows)
+        payload_rows: list[dict[str, Any]] = []
+        for row in rows:
+            if hasattr(row, "_mapping"):
+                payload_rows.append(dict(row._mapping))
+            else:
+                payload_rows.append(dict(zip(columns, row)))
         return {
             "columns": columns,
-            "rows": [dict(zip(columns, row)) for row in rows],
+            "rows": payload_rows,
             "count": len(rows),
-            "truncated": len(rows) == _MAX_RESULT_ROWS,
+            "truncated": len(rows) == max_rows,
+            "max_rows": max_rows,
+            "table_refs": [f"{schema}.{table}" for schema, table in table_refs],
         }
 
 
@@ -595,6 +812,8 @@ async def run_orchestration(
     input: str,
     workflow: str | None = None,
     auto_route: bool = False,
+    background: bool = True,
+    project_id: str | None = None,
 ) -> Any:
     """When to use:
     Run multi-step workflows with routing, retries, and coordination.
@@ -603,6 +822,7 @@ async def run_orchestration(
     - input: Workflow task description.
     - workflow: Optional workflow name.
     - auto_route: Let system pick workflow automatically.
+    - background: Run asynchronously in background and return pending status.
 
     Returns:
     - run_id, status, and workflow result.
@@ -611,26 +831,43 @@ async def run_orchestration(
     - Manually simulating orchestration in a single agent call.
     """
     from app.orchestration.service import OrchestrationService
+    context = await _get_active_mcp_context()
+    effective_project_id = project_id or context.get("project_id")
     factory = _get_session_factory()
     short_term = _get_short_term()
     async with factory() as db:
         orch_svc = OrchestrationService(db, short_term)
-        result = await orch_svc.start_run(
-            workflow_name=workflow,
-            input_text=input,
-            auto_route=auto_route,
-        )
+        if background:
+            result = await orch_svc.enqueue_run(
+                workflow_name=workflow,
+                input_text=input,
+                auto_route=auto_route,
+                project_id=effective_project_id,
+            )
+        else:
+            result = await orch_svc.start_run(
+                workflow_name=workflow,
+                input_text=input,
+                auto_route=auto_route,
+                project_id=effective_project_id,
+            )
         await db.commit()
+        if effective_project_id:
+            context["project_id"] = str(effective_project_id)
+            await _set_active_mcp_context(context)
         return {
             "run_id": result.get("run_id"),
+            "workflow": result.get("workflow"),
             "status": result.get("status"),
             "result": result.get("result"),
+            "queued": result.get("queued", False),
+            "project_id": str(effective_project_id) if effective_project_id else None,
         }
 
 
 @mcp.tool(name="project_analyze")
 async def analyze_project(
-    project_path: str,
+    project_path: str | None = None,
     project_name: str | None = None,
     force_reindex: bool = False,
 ) -> Any:
@@ -638,7 +875,8 @@ async def analyze_project(
     Ingest or refresh project structure in Postgres.
 
     Inputs:
-    - project_path: Filesystem path to project root.
+    - project_path: Optional filesystem path to project root. If omitted,
+      tool tries MCP context and configured env candidates.
     - project_name: Optional display name.
     - force_reindex: Rebuild existing project records.
 
@@ -650,18 +888,68 @@ async def analyze_project(
     """
     from app.indexing import ProjectIndexer
 
+    context = await _get_active_mcp_context()
+    effective_project_path = (project_path or context.get("project_path") or "").strip()
+    detected_from = "input_or_context"
+    if not effective_project_path:
+        env_path = _auto_project_path_from_env()
+        if env_path:
+            effective_project_path = env_path
+            detected_from = "env"
+
+    if not effective_project_path:
+        settings = get_settings()
+        return {
+            "error": (
+                "project_path is required. Pass it explicitly, call context_set with project_path, "
+                "or configure autonomous env vars via "
+                f"AUTONOMOUS_PROJECT_ENV_KEYS ({settings.autonomous_project_env_keys}) "
+                "and AUTONOMOUS_PROJECT_FALLBACK_PATH."
+            )
+        }
+
     factory = _get_session_factory()
+    short_term = _get_short_term()
     async with factory() as db:
         indexer = ProjectIndexer(db)
         project = await indexer.index_project(
-            project_path=project_path,
+            project_path=effective_project_path,
             project_name=project_name,
             force_reindex=force_reindex,
         )
-        context = await _get_active_mcp_context()
+        agent_service = AgentService(db, short_term)
+        project_agents = await agent_service.ensure_project_agents(
+            project_id=str(project.id),
+            project_name=project.name,
+        )
+        await db.commit()
+        planner_agent_id = project_agents.get("planner", {}).get("id")
         context["project_id"] = str(project.id)
+        context["project_path"] = project.path
+        context["project_path_source"] = detected_from
+        if planner_agent_id:
+            context["agent_id"] = planner_agent_id
         await _set_active_mcp_context(context)
         summary = await indexer.get_project_summary(str(project.id))
+        brain_memory = {"stored": 0, "created": 0, "deduplicated": 0, "memory_ids": []}
+        try:
+            memory_service = MemoryService(db, short_term)
+            brain_memory = await persist_project_memories(
+                memory_service,
+                summary,
+                project_id=str(project.id),
+                project_name=project.name,
+                project_path=project.path,
+            )
+            await db.commit()
+        except Exception as memory_error:
+            logger.warning(
+                "Failed to persist project memories for project %s: %s",
+                project.id,
+                memory_error,
+            )
+            if hasattr(db, "rollback"):
+                await db.rollback()
         return {
             "project_id": str(project.id),
             "project_name": project.name,
@@ -680,6 +968,20 @@ async def analyze_project(
                 "databases": project.databases,
                 "build_tools": project.build_tools,
             },
+            "brain_memory": brain_memory,
+            "project_agents": {
+                role: {
+                    "id": info.get("id"),
+                    "name": info.get("name"),
+                    "project_role": (
+                        info.get("config", {}).get("project_role")
+                        if isinstance(info.get("config"), dict)
+                        else None
+                    ),
+                }
+                for role, info in project_agents.items()
+            },
+            "default_agent_id": planner_agent_id,
         }
 
 
@@ -737,6 +1039,65 @@ async def list_projects(
             }
             for project in projects
         ]
+
+
+@mcp.tool(name="project_agents_bootstrap")
+async def bootstrap_project_agents(
+    project_id: str | None = None,
+    project_name: str | None = None,
+    set_active_planner: bool = True,
+) -> Any:
+    """When to use:
+    Ensure role-based agents exist for one project (planner/coder/reviewer/memory).
+
+    Inputs:
+    - project_id: Optional; auto-filled from context.
+    - project_name: Optional display name for agent metadata.
+    - set_active_planner: If true, context.agent_id will point to planner role.
+
+    Returns:
+    - project_id and role->agent mapping.
+    """
+    context = await _get_active_mcp_context()
+    effective_project_id = project_id or context.get("project_id")
+    if not effective_project_id:
+        return {"error": "project_id is required (pass explicitly or set via context_set/project_analyze)"}
+
+    factory = _get_session_factory()
+    short_term = _get_short_term()
+    async with factory() as db:
+        if not project_name:
+            project_name = await _resolve_project_name(db, str(effective_project_id))
+        svc = AgentService(db, short_term)
+        agents = await svc.ensure_project_agents(
+            project_id=str(effective_project_id),
+            project_name=project_name,
+        )
+        await db.commit()
+
+    planner_id = str(agents.get("planner", {}).get("id")) if agents.get("planner") else None
+    if set_active_planner and planner_id:
+        context["project_id"] = str(effective_project_id)
+        context["agent_id"] = planner_id
+        await _set_active_mcp_context(context)
+
+    return {
+        "project_id": str(effective_project_id),
+        "project_name": project_name,
+        "default_agent_id": planner_id,
+        "agents": {
+            role: {
+                "id": info.get("id"),
+                "name": info.get("name"),
+                "project_role": (
+                    info.get("config", {}).get("project_role")
+                    if isinstance(info.get("config"), dict)
+                    else None
+                ),
+            }
+            for role, info in agents.items()
+        },
+    }
 
 
 @mcp.tool(name="project_components")
@@ -952,7 +1313,7 @@ async def project_graph_path(
 
 @mcp.tool(name="project_graph_neighbors")
 async def project_graph_neighbors(
-    component_id: str,
+    component_id: str | None = None,
     project_id: str | None = None,
     depth: int = 1,
 ) -> Any:
@@ -960,7 +1321,7 @@ async def project_graph_neighbors(
     Explore local dependency neighborhood around a component.
 
     Inputs:
-    - component_id: Target component.
+    - component_id: Optional target component. If omitted, tool picks a default project component.
     - project_id: Optional; auto-filled from context.
     - depth: Traversal radius.
 
@@ -979,10 +1340,23 @@ async def project_graph_neighbors(
 
     factory = _get_session_factory()
     async with factory() as db:
+        effective_component_id = component_id or context.get("component_id")
+        if not effective_component_id:
+            effective_component_id = await _resolve_default_component_id(db, effective_project_id)
+        if not effective_component_id:
+            return {
+                "error": (
+                    "component_id is required because project has no indexed components. "
+                    "Run project_analyze first."
+                )
+            }
+
+        context["component_id"] = effective_component_id
+        await _set_active_mcp_context(context)
         svc = GraphDependencyService(db)
         return await svc.graph_neighbors(
             project_id=effective_project_id,
-            component_id=component_id,
+            component_id=effective_component_id,
             depth=depth,
         )
 
@@ -1059,6 +1433,23 @@ def configure_mcp(app: FastAPI) -> None:
                 if isinstance(message.root, mcp_types.JSONRPCRequest):
                     if message.root.method == "initialize":
                         _session_initialized.discard(session_id)
+                        try:
+                            params = payload.get("params") if isinstance(payload, dict) else {}
+                            candidates = extract_project_paths_from_mcp_params(params)
+                            if candidates:
+                                await _capture_project_path_in_context(
+                                    candidates[0],
+                                    source="mcp_initialize",
+                                )
+                                logger.info(
+                                    "Captured project_path from MCP initialize: %s",
+                                    candidates[0],
+                                )
+                        except Exception as capture_error:
+                            logger.debug(
+                                "Failed to capture project_path from initialize payload: %s",
+                                capture_error,
+                            )
                     elif session_id not in _session_initialized:
                         logger.warning(
                             "Rejected pre-initialize MCP request: method=%s session_id=%s",

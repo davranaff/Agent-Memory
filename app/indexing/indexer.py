@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -126,7 +125,7 @@ class ProjectIndexer:
             for i in range(0, len(source_files), batch_size):
                 batch = source_files[i:i + batch_size]
                 await self._process_file_batch(batch, project.id)
-                total_lines += sum(await self._count_lines_in_files(batch))
+                total_lines += await self._count_lines_in_files(batch)
                 
                 # Commit batch to avoid long transactions
                 await self.db.commit()
@@ -167,19 +166,12 @@ class ProjectIndexer:
 
     async def _process_file_batch(self, files: List[FileInfo], project_id: str) -> None:
         """Process a batch of files and create components."""
-        tasks = []
-        
+        # One AsyncSession cannot safely flush concurrently across tasks.
         for file_info in files:
-            task = self._process_single_file(file_info, project_id)
-            tasks.append(task)
-        
-        # Process files concurrently
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Handle errors
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                logger.error(f"Error processing file {files[i].path}: {result}")
+            try:
+                await self._process_single_file(file_info, project_id)
+            except Exception as e:
+                logger.error(f"Error processing file {file_info.path}: {e}")
 
     async def _process_single_file(self, file_info: FileInfo, project_id: str) -> None:
         """Process a single file and create components."""

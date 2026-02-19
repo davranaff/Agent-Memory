@@ -24,45 +24,39 @@ class ProjectAnalyzer:
         """Initialize patterns to detect frameworks."""
         return {
             "react": [
-                r"import.*react", r"from\s+['\"]react['\"]", r"React\.",
-                r"ReactDOM", r"jsx", r"tsx", r"\.jsx?$"
+                r"from\s+['\"]react['\"]", r"require\(['\"]react['\"]\)",
+                r"react-dom", r"react-router"
             ],
             "vue": [
-                r"import.*vue", r"from\s+['\"]vue['\"]", r"Vue\.",
-                r"<template>", r"<script>", r"<style>",
-                r"\.vue$"
+                r"from\s+['\"]vue['\"]", r"require\(['\"]vue['\"]\)",
+                r"createapp\(", r"@vue/"
             ],
             "angular": [
-                r"import.*@angular", r"@angular/", r"Component\(",
-                r"@Component", r"NgModule", r"FormsModule"
+                r"from\s+['\"]@angular/", r"@angular/",
+                r"@component\(", r"@ngmodule\("
             ],
             "fastapi": [
-                r"from\s+fastapi", r"import\s+fastapi", r"FastAPI\(",
-                r"@app\.", r"APIRouter", r"Depends"
+                r"from\s+fastapi", r"import\s+fastapi", r"fastapi\(",
+                r"apirouter\("
             ],
             "django": [
                 r"from\s+django", r"import\s+django", r"django\.",
-                r"models\.Model", r"views\.", r"urls\.",
-                r"settings\.py"
+                r"manage\.py", r"wsgi\.py", r"asgi\.py"
             ],
             "flask": [
-                r"from\s+flask", r"import\s+flask", r"Flask\(",
-                r"@app\.route", r"render_template", r"request\."
+                r"from\s+flask", r"import\s+flask", r"flask\("
             ],
             "express": [
-                r"require\(['\"]express['\"]", r"import.*express",
-                r"express\(\)", r"app\.get", r"app\.post",
-                r"router\."
+                r"require\(['\"]express['\"]\)", r"from\s+['\"]express['\"]",
+                r"express\(\)"
             ],
             "spring": [
                 r"@SpringBootApplication", r"@RestController", r"@Service",
-                r"@Repository", r"@Entity", r"org\.springframework",
-                r"spring-boot"
+                r"org\.springframework", r"spring-boot"
             ],
             "rails": [
-                r"Rails\.application", r"ApplicationController", r"ActiveRecord",
-                r"has_many", r"belongs_to", r"validates",
-                r"config/routes\.rb"
+                r"rails\.application", r"applicationrecord",
+                r"activerecord::base", r"config/routes\.rb"
             ]
         }
 
@@ -98,30 +92,98 @@ class ProjectAnalyzer:
         """Initialize patterns to detect databases."""
         return {
             "postgresql": [
-                r"postgresql", r"psycopg2", r"pg8000", r"sqlalchemy",
-                r"postgres", r"pg_dump", r"psql"
+                r"postgresql://", r"postgres://", r"psycopg", r"asyncpg", r"pg8000", r"\bpostgresql\b"
             ],
             "mysql": [
-                r"mysql", r"pymysql", r"mysql-connector", r"mysqldb",
-                r"mysql2", r"sequelize"
+                r"mysql://", r"mysql\+pymysql://", r"pymysql", r"mysql-connector", r"mysqldb", r"\bmysql\b"
             ],
             "mongodb": [
-                r"mongodb", r"pymongo", r"mongoose", r"mongoengine",
-                r"mongo-client"
+                r"mongodb://", r"mongodb\+srv://", r"pymongo", r"mongoengine", r"mongoose", r"\bmongodb\b"
             ],
             "redis": [
-                r"redis", r"redis-py", r"ioredis", r"redis-client",
-                r"redis-cluster"
+                r"redis://", r"import\s+redis", r"from\s+redis", r"ioredis", r"\bredis\b"
             ],
             "sqlite": [
-                r"sqlite", r"sqlite3", r"sqlalchemy.*sqlite",
-                r"\.db$", r"\.sqlite$", r"\.sqlite3$"
+                r"sqlite://", r"sqlite3", r"\bsqlite\b", r"\.db\b", r"\.sqlite\b", r"\.sqlite3\b"
             ],
             "elasticsearch": [
-                r"elasticsearch", r"elasticsearch-py", r"elastic",
-                r"es-client", r"elasticsearch-client"
+                r"elasticsearch://", r"elasticsearch", r"elastic-transport", r"from\s+elasticsearch", r"import\s+elasticsearch"
             ]
         }
+
+    def _framework_file_candidates(self, framework: str, files: List[FileInfo]) -> List[FileInfo]:
+        """Return file candidates relevant for framework detection."""
+        js_like = {"javascript", "typescript"}
+        py_like = {"python"}
+        jvm_like = {"java", "kotlin"}
+        ruby_like = {"ruby"}
+
+        manifest_by_framework = {
+            "react": {"package.json"},
+            "vue": {"package.json"},
+            "angular": {"package.json", "angular.json"},
+            "express": {"package.json"},
+            "fastapi": {"requirements.txt", "pyproject.toml", "pipfile"},
+            "flask": {"requirements.txt", "pyproject.toml", "pipfile"},
+            "django": {"requirements.txt", "pyproject.toml", "pipfile", "manage.py"},
+            "spring": {"pom.xml", "build.gradle", "build.gradle.kts"},
+            "rails": {"gemfile", "gemfile.lock"},
+        }
+
+        allowed_languages: set[str] = set()
+        if framework in {"react", "vue", "angular", "express"}:
+            allowed_languages = js_like
+        elif framework in {"fastapi", "flask", "django"}:
+            allowed_languages = py_like
+        elif framework == "spring":
+            allowed_languages = jvm_like
+        elif framework == "rails":
+            allowed_languages = ruby_like
+
+        manifests = manifest_by_framework.get(framework, set())
+        candidates: List[FileInfo] = []
+        for file_info in files:
+            if file_info.is_binary or file_info.is_generated or file_info.is_documentation:
+                continue
+            language = (file_info.language or "").lower()
+            filename = Path(file_info.path).name.lower()
+            if language in allowed_languages or filename in manifests:
+                candidates.append(file_info)
+        return candidates
+
+    def _database_file_candidates(self, files: List[FileInfo]) -> List[FileInfo]:
+        """Return file candidates relevant for database detection."""
+        allow_configs = {
+            ".env",
+            ".env.example",
+            "docker-compose.yml",
+            "docker-compose.yaml",
+            "requirements.txt",
+            "pyproject.toml",
+            "pipfile",
+            "package.json",
+            "pom.xml",
+            "build.gradle",
+            "build.gradle.kts",
+        }
+        deny_files = {
+            "poetry.lock",
+            "pipfile.lock",
+            "package-lock.json",
+            "yarn.lock",
+            "pnpm-lock.yaml",
+        }
+
+        candidates: List[FileInfo] = []
+        for file_info in files:
+            if file_info.is_binary or file_info.is_generated or file_info.is_documentation:
+                continue
+            filename = Path(file_info.path).name.lower()
+            if filename in deny_files:
+                continue
+            if file_info.language or filename in allow_configs:
+                candidates.append(file_info)
+        return candidates
 
     def detect_technology_stack(self, files: List[FileInfo]) -> Dict[str, List[str]]:
         """Detect the technology stack from files."""
@@ -138,32 +200,39 @@ class ProjectAnalyzer:
         language_counter = Counter(f.language for f in files if f.language)
         detected["languages"] = [lang for lang, _ in language_counter.most_common()]
 
-        # Detect frameworks
+        # Detect frameworks with language/manifests scoped candidates.
         framework_matches = defaultdict(int)
-        for file_info in files:
-            if file_info.is_binary or file_info.is_generated:
-                continue
-            
-            try:
-                with open(file_info.path, 'r', encoding='utf-8', errors='ignore') as f:
-                    content = f.read().lower()
-                    
-                    for framework, patterns in self.framework_patterns.items():
+        for framework, patterns in self.framework_patterns.items():
+            for file_info in self._framework_file_candidates(framework, files):
+                try:
+                    with open(file_info.path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read().lower()
                         for pattern in patterns:
                             if re.search(pattern, content, re.IGNORECASE):
                                 framework_matches[framework] += 1
                                 break
-            except (IOError, UnicodeDecodeError):
-                continue
+                except (IOError, UnicodeDecodeError):
+                    continue
 
-        detected["frameworks"] = [fw for fw, count in framework_matches.items() if count > 0]
+        framework_thresholds = {
+            "react": 1,
+            "vue": 1,
+            "angular": 1,
+            "express": 1,
+            "fastapi": 1,
+            "django": 1,
+            "flask": 1,
+            "spring": 1,
+            "rails": 1,
+        }
+        detected["frameworks"] = [
+            fw for fw, count in framework_matches.items()
+            if count >= framework_thresholds.get(fw, 1)
+        ]
 
-        # Detect databases
+        # Detect databases from source and selected config files.
         database_matches = defaultdict(int)
-        for file_info in files:
-            if file_info.is_binary or file_info.is_generated:
-                continue
-            
+        for file_info in self._database_file_candidates(files):
             try:
                 with open(file_info.path, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read().lower()
@@ -176,7 +245,18 @@ class ProjectAnalyzer:
             except (IOError, UnicodeDecodeError):
                 continue
 
-        detected["databases"] = [db for db, count in database_matches.items() if count > 0]
+        database_thresholds = {
+            "postgresql": 1,
+            "mysql": 1,
+            "mongodb": 1,
+            "redis": 1,
+            "sqlite": 1,
+            "elasticsearch": 1,
+        }
+        detected["databases"] = [
+            db for db, count in database_matches.items()
+            if count >= database_thresholds.get(db, 1)
+        ]
 
         # Detect build tools from file names and content
         build_tool_patterns = {

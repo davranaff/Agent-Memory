@@ -35,11 +35,20 @@ async def run_orchestration(
     the best workflow based on input content.
     """
     try:
-        result = await svc.start_run(
-            workflow_name=body.workflow,
-            input_text=body.input,
-            auto_route=body.auto_route,
-        )
+        if body.background:
+            result = await svc.enqueue_run(
+                workflow_name=body.workflow,
+                input_text=body.input,
+                auto_route=body.auto_route,
+                project_id=body.project_id,
+            )
+        else:
+            result = await svc.start_run(
+                workflow_name=body.workflow,
+                input_text=body.input,
+                auto_route=body.auto_route,
+                project_id=body.project_id,
+            )
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

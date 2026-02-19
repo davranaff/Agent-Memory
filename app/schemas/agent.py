@@ -21,6 +21,10 @@ class AgentRun(BaseModel):
     input: str = Field(..., min_length=1)
     session_id: uuid.UUID | None = None
     context: dict[str, Any] | None = None
+    background: bool = Field(
+        default=True,
+        description="Run asynchronously in background and return run_id immediately.",
+    )
 
 
 # ── Response ──────────────────────────────────────────────────────────

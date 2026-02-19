@@ -29,6 +29,16 @@ HOST_PROJECTS_ROOT=..
 PROJECT_PATH_MAPPINGS=/Users/your-user/Desktop=/host-projects
 ```
 
+For autonomous IDE flows over MCP:
+- `project_analyze` can run without `project_path`.
+- server auto-captures workspace path from MCP `initialize` payload (`rootUri`/`workspaceFolders` when provided by client).
+- fallback env detection is configurable:
+
+```env
+AUTONOMOUS_PROJECT_ENV_KEYS=MCP_PROJECT_PATH,IDE_PROJECT_PATH,WORKSPACE_FOLDER,WORKSPACE_ROOT,VSCODE_WORKSPACE_FOLDER,PROJECT_PATH
+AUTONOMOUS_PROJECT_FALLBACK_PATH=
+```
+
 ## Architecture
 
 ```
@@ -78,12 +88,19 @@ Notes:
 | POST | `/orchestration/run` | Start orchestration workflow |
 | GET | `/orchestration/{run_id}` | Get run status & results |
 | GET | `/orchestration/workflows/list` | List available workflows |
+| GET | `/agents/runs/{run_id}` | Get async agent run status/result |
+
+`/orchestration/run` accepts `background` (default `true`): queued runs return `status=pending`, then transition to `running/completed/failed`.
+`/agents/{agent_id}/run` accepts `background` (default `true`) and returns `run_id` for polling via `/agents/runs/{run_id}`.
 
 ## MCP Integration
 
 ### Server (exposed at `/mcp/sse`)
 
-Tools: `context_set`, `context_get`, `context_clear`, `memory_store`, `memory_search`, `memory_get`, `memory_delete`, `memory_reindex`, `agent_run`, `agent_get_state`, `db_query`, `embeddings_create`, `orchestration_run`, `project_analyze`, `project_list`, `project_components`, `project_dependencies_analyze`, `project_graph_sync`, `project_graph_impact`, `project_graph_path`, `project_graph_neighbors`
+Tools: `context_set`, `context_get`, `context_clear`, `memory_store`, `memory_search`, `memory_get`, `memory_delete`, `memory_reindex`, `agent_run`, `agent_run_status`, `agent_get_state`, `db_query`, `embeddings_create`, `orchestration_run`, `project_analyze`, `project_list`, `project_components`, `project_dependencies_analyze`, `project_graph_sync`, `project_graph_impact`, `project_graph_path`, `project_graph_neighbors`
+
+`db_query` is enabled by default, supports read-only `SELECT`, and allows metadata queries from `information_schema`/`pg_catalog`.
+`orchestration_run` supports `background=true` (default) and returns a pending `run_id` immediately.
 
 Connect from any MCP client (Windsurf, Claude, etc.):
 ```json
@@ -118,6 +135,7 @@ Then:
 - `agent_run` can omit `agent_id` and `session_id`.
 - `memory_store` can omit `agent_id`; it auto-adds `metadata.project_id/session_id` from context.
 - graph tools can omit `project_id`.
+- `project_analyze` can omit `project_path` if `context.project_path`/MCP initialize/env already provides it.
 
 Note: current active MCP context is server-level (one active context at a time).
 
@@ -165,11 +183,15 @@ curl "http://localhost:8000/projects/<project-id>/graph/impact?component_id=<com
 | `EMBEDDING_MODEL` | `nomic-embed-text` | Embedding model |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama API URL |
 | `MCP_ENABLED` | `true` | Enable MCP server |
+| `MCP_DB_QUERY_ENABLED` | `true` | Enable MCP `db_query` tool |
 | `PROJECT_PATH_MAPPINGS` | `` | Host/container prefix mappings for project paths (`/host=/container`) |
+| `AUTONOMOUS_PROJECT_ENV_KEYS` | `MCP_PROJECT_PATH,...` | Env keys used to auto-detect active IDE project path |
+| `AUTONOMOUS_PROJECT_FALLBACK_PATH` | `` | Optional fallback project path for autonomous analyze |
 | `HOST_PROJECTS_ROOT` | `..` | Docker Compose host directory mounted to `/host-projects` |
 | `ORCHESTRATION_ENABLED` | `true` | Enable multi-agent orchestration |
 | `ORCHESTRATION_MAX_PARALLEL_AGENTS` | `4` | Max concurrent agents |
 | `ORCHESTRATION_MAX_RETRIES` | `3` | Max retries per step |
+| `ORCHESTRATION_AUTOCREATE_AGENTS` | `true` | Auto-create missing workflow role agents (`reasoning_agent`, etc.) |
 | `GRAPH_BACKEND` | `inmemory` | Graph backend (`inmemory` or `neo4j`) |
 | `GRAPH_FALLBACK_TO_INMEMORY` | `true` | Fallback when Neo4j unavailable |
 | `NEO4J_URI` | `bolt://neo4j:7687` | Neo4j Bolt URI |

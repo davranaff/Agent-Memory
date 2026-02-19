@@ -35,6 +35,18 @@ async def create_agent(
     return result
 
 
+@router.get("/runs/{run_id}")
+async def get_agent_run(
+    run_id: uuid.UUID,
+    svc: AgentService = Depends(_get_agent_service),
+):
+    """Get asynchronous agent run status/result by run_id."""
+    result = await svc.get_run_status(run_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Agent run not found")
+    return result
+
+
 @router.get("/{agent_id}")
 async def get_agent(
     agent_id: uuid.UUID,
@@ -55,12 +67,20 @@ async def run_agent(
 ):
     """Run the agent with a given input."""
     try:
-        result = await svc.run_agent(
-            agent_id=agent_id,
-            input_text=body.input,
-            session_id=body.session_id,
-            context=body.context,
-        )
+        if body.background:
+            result = await svc.enqueue_run(
+                agent_id=agent_id,
+                input_text=body.input,
+                session_id=body.session_id,
+                context=body.context,
+            )
+        else:
+            result = await svc.run_agent(
+                agent_id=agent_id,
+                input_text=body.input,
+                session_id=body.session_id,
+                context=body.context,
+            )
         return result
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))

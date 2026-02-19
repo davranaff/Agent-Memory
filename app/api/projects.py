@@ -17,6 +17,8 @@ from app.profiling import TechnologyStackProfiler
 from app.patterns import ArchitecturePatternDetector
 from app.registry import ComponentRegistry, ComponentSearch, ComponentAnalytics
 from app.parsing import parse_file
+from app.services.memory_service import MemoryService
+from app.services.project_memory import persist_project_memories
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +111,25 @@ async def analyze_project(
         
         # Get project summary
         summary = await indexer.get_project_summary(str(project.id))
+        brain_memory = {"stored": 0, "created": 0, "deduplicated": 0, "memory_ids": []}
+        try:
+            memory_service = MemoryService(db)
+            brain_memory = await persist_project_memories(
+                memory_service,
+                summary,
+                project_id=str(project.id),
+                project_name=project.name,
+                project_path=project.path,
+            )
+            await db.commit()
+        except Exception as memory_error:
+            logger.warning(
+                "Failed to persist project memories for project %s: %s",
+                project.id,
+                memory_error,
+            )
+            if hasattr(db, "rollback"):
+                await db.rollback()
         
         return ProjectAnalysisResponse(
             project_id=str(project.id),
@@ -124,7 +145,8 @@ async def analyze_project(
                 "frameworks": project.frameworks,
                 "languages": project.languages,
                 "databases": project.databases,
-                "build_tools": project.build_tools
+                "build_tools": project.build_tools,
+                "brain_memory": brain_memory,
             }
         )
         
@@ -151,6 +173,7 @@ async def get_project_summary(
 @router.get("/{project_id}/components")
 async def get_project_components(
     project_id: str,
+    query: str = Query("", description="Optional name/path search query"),
     component_type: Optional[str] = Query(None, description="Filter by component type"),
     language: Optional[str] = Query(None, description="Filter by language"),
     limit: int = Query(100, description="Maximum number of components"),
@@ -172,6 +195,7 @@ async def get_project_components(
         
         components = await indexer.search_components(
             project_id=project_id,
+            query=query,
             component_type=component_type_enum,
             language=language,
             limit=limit,
